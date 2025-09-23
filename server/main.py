@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pymongo import MongoClient
-from bson import ObjectId
+from prisma import Prisma
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
@@ -22,141 +21,205 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB connection
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-client = MongoClient(MONGODB_URL)
-db = client.personal_day_planner
-todos_collection = db.todos
+# Prisma client
+db = Prisma()
 
-# Pydantic models (compatible with both v1 and v2)
-class TodoCreate(BaseModel):
+# Pydantic models for API
+class TaskCreate(BaseModel):
     title: str
     description: Optional[str] = None
+    priority: float = 50.0  # Priority as percentage (0-100)
     completed: bool = False
-    priority: Optional[str] = "medium"  # low, medium, high
-    due_date: Optional[str] = None
+    paused: bool = False
+    due_date: Optional[datetime] = None
 
-class TodoUpdate(BaseModel):
+class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    priority: Optional[float] = None
     completed: Optional[bool] = None
-    priority: Optional[str] = None
-    due_date: Optional[str] = None
+    paused: Optional[bool] = None
+    due_date: Optional[datetime] = None
 
-class TodoResponse(BaseModel):
-    id: str = Field(alias="_id")
+class TaskResponse(BaseModel):
+    id: str
     title: str
     description: Optional[str] = None
-    completed: bool = False
-    priority: str = "medium"
-    due_date: Optional[str] = None
-    created_at: str
-    updated_at: str
+    priority: float
+    completed: bool
+    paused: bool
+    created_at: datetime
+    updated_at: datetime
+    due_date: Optional[datetime] = None
 
-    class Config:
-        allow_population_by_field_name = True
-        # For Pydantic v2 compatibility
-        populate_by_name = True
+# Database connection events
+@app.on_event("startup")
+async def startup():
+    await db.connect()
+    print("✅ Connected to MongoDB via Prisma")
 
-# Helper function to convert ObjectId to string
-def todo_helper(todo) -> dict:
-    return {
-        "id": str(todo["_id"]),
-        "title": todo["title"],
-        "description": todo.get("description"),
-        "completed": todo.get("completed", False),
-        "priority": todo.get("priority", "medium"),
-        "due_date": todo.get("due_date"),
-        "created_at": todo.get("created_at"),
-        "updated_at": todo.get("updated_at")
-    }
+@app.on_event("shutdown")
+async def shutdown():
+    await db.disconnect()
+    print("👋 Disconnected from MongoDB")
 
 # Routes
 @app.get("/")
 async def root():
-    return {"message": "Personal Day Planner API", "status": "running"}
+    return {
+        "message": "Personal Day Planner API", 
+        "status": "running",
+        "database": "MongoDB + Prisma"
+    }
 
 @app.get("/health")
 async def health_check():
     try:
-        # Test database connection
-        client.admin.command('ping')
-        return {"status": "healthy", "database": "connected"}
+        # Test database connection by counting tasks
+        count = await db.task.count()
+        return {
+            "status": "healthy", 
+            "database": "connected",
+            "tasks_count": count
+        }
     except Exception as e:
-        return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
+        return {
+            "status": "unhealthy", 
+            "database": "disconnected", 
+            "error": str(e)
+        }
 
-@app.post("/todos")
-async def create_todo(todo: TodoCreate):
-    todo_dict = todo.dict()
-    todo_dict["created_at"] = datetime.utcnow().isoformat()
-    todo_dict["updated_at"] = datetime.utcnow().isoformat()
-    
-    result = todos_collection.insert_one(todo_dict)
-    created_todo = todos_collection.find_one({"_id": result.inserted_id})
-    
-    return todo_helper(created_todo)
+@app.post("/tasks", response_model=TaskResponse)
+async def create_task(task: TaskCreate):
+    try:
+        # Validate priority is between 0 and 100
+        if task.priority < 0 or task.priority > 100:
+            raise HTTPException(status_code=400, detail="Priority must be between 0 and 100")
+        
+        created_task = await db.task.create(
+            data={
+                "title": task.title,
+                "description": task.description,
+                "priority": task.priority,
+                "completed": task.completed,
+                "paused": task.paused,
+                "due_date": task.due_date,
+            }
+        )
+        return created_task
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
 
-@app.get("/todos")
-async def get_todos():
-    todos = list(todos_collection.find())
-    return [todo_helper(todo) for todo in todos]
+@app.get("/tasks", response_model=List[TaskResponse])
+async def get_all_tasks():
+    try:
+        tasks = await db.task.find_many(
+            order={"created_at": "desc"}
+        )
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tasks: {str(e)}")
 
-@app.get("/todos/{todo_id}")
-async def get_todo(todo_id: str):
-    if not ObjectId.is_valid(todo_id):
-        raise HTTPException(status_code=400, detail="Invalid todo ID format")
-    
-    todo = todos_collection.find_one({"_id": ObjectId(todo_id)})
-    if not todo:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    
-    return todo_helper(todo)
+@app.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_task_by_id(task_id: str):
+    try:
+        task = await db.task.find_unique(
+            where={"id": task_id}
+        )
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return task
+    except Exception as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch task: {str(e)}")
 
-@app.put("/todos/{todo_id}")
-async def update_todo(todo_id: str, todo_update: TodoUpdate):
-    if not ObjectId.is_valid(todo_id):
-        raise HTTPException(status_code=400, detail="Invalid todo ID format")
-    
-    update_data = {k: v for k, v in todo_update.dict().items() if v is not None}
-    if not update_data:
-        raise HTTPException(status_code=400, detail="No fields to update")
-    
-    update_data["updated_at"] = datetime.utcnow().isoformat()
-    
-    result = todos_collection.update_one(
-        {"_id": ObjectId(todo_id)}, 
-        {"$set": update_data}
-    )
-    
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    
-    updated_todo = todos_collection.find_one({"_id": ObjectId(todo_id)})
-    return todo_helper(updated_todo)
+@app.put("/tasks/{task_id}", response_model=TaskResponse)
+async def update_task(task_id: str, task_update: TaskUpdate):
+    try:
+        # Build update data, only including fields that are provided
+        update_data = {}
+        if task_update.title is not None:
+            update_data["title"] = task_update.title
+        if task_update.description is not None:
+            update_data["description"] = task_update.description
+        if task_update.priority is not None:
+            if task_update.priority < 0 or task_update.priority > 100:
+                raise HTTPException(status_code=400, detail="Priority must be between 0 and 100")
+            update_data["priority"] = task_update.priority
+        if task_update.completed is not None:
+            update_data["completed"] = task_update.completed
+        if task_update.paused is not None:
+            update_data["paused"] = task_update.paused
+        if task_update.due_date is not None:
+            update_data["due_date"] = task_update.due_date
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        
+        updated_task = await db.task.update(
+            where={"id": task_id},
+            data=update_data
+        )
+        return updated_task
+    except Exception as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=500, detail=f"Failed to update task: {str(e)}")
 
-@app.delete("/todos/{todo_id}")
-async def delete_todo(todo_id: str):
-    if not ObjectId.is_valid(todo_id):
-        raise HTTPException(status_code=400, detail="Invalid todo ID format")
-    
-    result = todos_collection.delete_one({"_id": ObjectId(todo_id)})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Todo not found")
-    
-    return {"message": "Todo deleted successfully"}
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: str):
+    try:
+        await db.task.delete(
+            where={"id": task_id}
+        )
+        return {"message": "Task deleted successfully"}
+    except Exception as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=500, detail=f"Failed to delete task: {str(e)}")
 
-@app.get("/todos/priority/{priority}")
-async def get_todos_by_priority(priority: str):
-    if priority not in ["low", "medium", "high"]:
-        raise HTTPException(status_code=400, detail="Priority must be 'low', 'medium', or 'high'")
-    
-    todos = list(todos_collection.find({"priority": priority}))
-    return [todo_helper(todo) for todo in todos]
+# Additional endpoints for filtering
+@app.get("/tasks/priority/{min_priority}/{max_priority}", response_model=List[TaskResponse])
+async def get_tasks_by_priority_range(min_priority: float, max_priority: float):
+    try:
+        if min_priority < 0 or max_priority > 100 or min_priority > max_priority:
+            raise HTTPException(status_code=400, detail="Invalid priority range")
+        
+        tasks = await db.task.find_many(
+            where={
+                "priority": {
+                    "gte": min_priority,
+                    "lte": max_priority
+                }
+            },
+            order={"priority": "desc"}
+        )
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tasks: {str(e)}")
 
-@app.get("/todos/status/{completed}")
-async def get_todos_by_status(completed: bool):
-    todos = list(todos_collection.find({"completed": completed}))
-    return [todo_helper(todo) for todo in todos]
+@app.get("/tasks/status/{completed}", response_model=List[TaskResponse])
+async def get_tasks_by_completion_status(completed: bool):
+    try:
+        tasks = await db.task.find_many(
+            where={"completed": completed},
+            order={"created_at": "desc"}
+        )
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tasks: {str(e)}")
+
+@app.get("/tasks/paused/{paused}", response_model=List[TaskResponse])
+async def get_tasks_by_paused_status(paused: bool):
+    try:
+        tasks = await db.task.find_many(
+            where={"paused": paused},
+            order={"created_at": "desc"}
+        )
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch tasks: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

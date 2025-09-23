@@ -1,0 +1,33 @@
+// Personal Day Planner Prisma Schema
+// Task management system with comprehensive task tracking using MongoDB
+
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URL")
+}
+
+model Task {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  title       String
+  description String?
+  
+  // Priority as percentage (0-100)
+  priority    Float    @default(50.0)
+  
+  // Status flags
+  completed   Boolean  @default(false)
+  paused      Boolean  @default(false)
+  
+  // Timestamps
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+  
+  // Optional due date
+  due_date    DateTime?
+  
+  @@map("tasks")
+}
