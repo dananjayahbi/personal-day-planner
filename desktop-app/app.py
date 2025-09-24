@@ -14,6 +14,7 @@ from src.utils.connection_manager import ConnectionManager
 from src.ui.modern_styles import ModernStyles
 from src.ui.task_list import ModernTaskList
 from src.ui.task_form import TaskForm
+from src.ui.loading import LoadingIndicator, show_loading
 from config.api_config import API_CONFIG
 
 class ModernTaskManager:
@@ -24,6 +25,7 @@ class ModernTaskManager:
         self.task_list = None
         self.tasks = []
         self.connection_status_label = None
+        self.loader = None
         
     def initialize(self):
         """Initialize the application"""
@@ -69,6 +71,9 @@ class ModernTaskManager:
         # Main container
         main_container = tk.Frame(self.root, **ModernStyles.get_frame_style('primary'))
         main_container.pack(fill='both', expand=True)
+        
+        # Initialize loading indicator
+        self.loader = LoadingIndicator(main_container)
         
         # Header section
         self.create_header(main_container)
@@ -226,15 +231,22 @@ class ModernTaskManager:
             
     def load_tasks(self):
         """Load tasks from server"""
-        def load():
-            try:
-                tasks = self.api_client.get_all_tasks()
-                self.root.after(0, self.update_task_display, tasks)
-            except Exception as e:
-                self.root.after(0, self.show_error, f"Failed to load tasks: {str(e)}")
+        def load_tasks_operation():
+            return self.api_client.get_all_tasks()
         
-        threading.Thread(target=load, daemon=True).start()
-        self.status_label.config(text="Loading tasks...")
+        def on_success(tasks):
+            self.update_task_display(tasks)
+        
+        def on_error(error):
+            self.show_error(f"Failed to load tasks: {str(error)}")
+        
+        show_loading(
+            self.root,
+            load_tasks_operation,
+            "Loading tasks...",
+            on_success,
+            on_error
+        )
         
     def update_task_display(self, tasks):
         """Update task display"""
@@ -262,40 +274,56 @@ class ModernTaskManager:
         
     def save_new_task(self, task_data):
         """Save new task"""
-        def save():
-            try:
-                created_task = self.api_client.create_task(task_data)
-                self.root.after(0, self.on_task_saved, created_task)
-            except Exception as e:
-                self.root.after(0, self.show_error, f"Failed to create task: {str(e)}")
+        def create_task_operation():
+            return self.api_client.create_task(task_data)
         
-        threading.Thread(target=save, daemon=True).start()
-        self.status_label.config(text="Creating task...")
+        def on_success(created_task):
+            self.on_task_saved(created_task)
+        
+        def on_error(error):
+            self.show_error(f"Failed to create task: {str(error)}")
+        
+        show_loading(
+            self.root,
+            create_task_operation,
+            "Creating task...",
+            on_success,
+            on_error
+        )
         
     def save_edited_task(self, task_data):
         """Save edited task"""
-        def save():
-            try:
-                task_id = task_data.pop('id')
-                updated_task = self.api_client.update_task(task_id, task_data)
-                self.root.after(0, self.on_task_saved, updated_task)
-            except Exception as e:
-                self.root.after(0, self.show_error, f"Failed to update task: {str(e)}")
+        def update_task_operation():
+            task_id = task_data.pop('id')
+            return self.api_client.update_task(task_id, task_data)
         
-        threading.Thread(target=save, daemon=True).start()
-        self.status_label.config(text="Updating task...")
+        def on_success(updated_task):
+            self.on_task_saved(updated_task)
+        
+        def on_error(error):
+            self.show_error(f"Failed to update task: {str(error)}")
+        
+        show_loading(
+            self.root,
+            update_task_operation,
+            "Updating task...",
+            on_success,
+            on_error
+        )
         
     def on_task_saved(self, task):
         """Handle task save completion"""
         self.load_tasks()  # Refresh the list
         self.status_label.config(text="Task saved successfully")
         
-    def handle_task_update(self, action, task):
+    def handle_task_update(self, action, task=None):
         """Handle quick task updates"""
         if action == 'refresh':
             self.refresh_tasks()
         elif action == 'complete' and task:
             self.quick_update_task(task, {'completed': True})
+        elif action == 'incomplete' and task:
+            self.quick_update_task(task, {'completed': False})
         elif action == 'pause' and task:
             current_paused = task.get('paused', False)
             self.quick_update_task(task, {'paused': not current_paused})
@@ -304,15 +332,30 @@ class ModernTaskManager:
             
     def quick_update_task(self, task, updates):
         """Quick update task status"""
-        def update():
-            try:
-                updated_task = self.api_client.update_task(task['id'], updates)
-                self.root.after(0, self.on_task_saved, updated_task)
-            except Exception as e:
-                self.root.after(0, self.show_error, f"Failed to update task: {str(e)}")
+        def update_task_operation():
+            return self.api_client.update_task(task['id'], updates)
         
-        threading.Thread(target=update, daemon=True).start()
-        self.status_label.config(text="Updating task...")
+        def on_success(updated_task):
+            self.on_task_saved(updated_task)
+        
+        def on_error(error):
+            self.show_error(f"Failed to update task: {str(error)}")
+        
+        # Determine message based on update type
+        if 'completed' in updates:
+            message = "Marking task complete..." if updates['completed'] else "Marking task incomplete..."
+        elif 'paused' in updates:
+            message = "Updating task status..."
+        else:
+            message = "Updating task..."
+        
+        show_loading(
+            self.root,
+            update_task_operation,
+            message,
+            on_success,
+            on_error
+        )
         
     def delete_task(self, task):
         """Delete a task"""
@@ -323,15 +366,23 @@ class ModernTaskManager:
         )
         
         if result:
-            def delete():
-                try:
-                    self.api_client.delete_task(task['id'])
-                    self.root.after(0, self.on_task_deleted)
-                except Exception as e:
-                    self.root.after(0, self.show_error, f"Failed to delete task: {str(e)}")
+            def delete_task_operation():
+                self.api_client.delete_task(task['id'])
+                return True
             
-            threading.Thread(target=delete, daemon=True).start()
-            self.status_label.config(text="Deleting task...")
+            def on_success(result):
+                self.on_task_deleted()
+            
+            def on_error(error):
+                self.show_error(f"Failed to delete task: {str(error)}")
+            
+            show_loading(
+                self.root,
+                delete_task_operation,
+                "Deleting task...",
+                on_success,
+                on_error
+            )
             
     def on_task_deleted(self):
         """Handle task deletion completion"""

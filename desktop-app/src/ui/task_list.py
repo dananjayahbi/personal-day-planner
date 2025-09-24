@@ -107,7 +107,7 @@ class ModernTaskList:
         # Quick action buttons
         buttons_data = [
             ('Refresh', 'secondary', self.refresh_tasks),
-            ('Mark Complete', 'success', self.mark_complete),
+            ('Toggle Complete', 'success', self.toggle_complete),
             ('Mark Paused', 'warning', self.mark_paused),
             ('Delete', 'danger', self.delete_task),
         ]
@@ -201,9 +201,12 @@ class ModernTaskList:
                                  fg=ModernStyles.COLORS['text_primary'],
                                  activebackground=ModernStyles.COLORS['accent_blue'])
             
+            task = self.get_selected_task()
+            complete_label = "Mark Incomplete" if task and task.get('completed', False) else "Mark Complete"
+            
             context_menu.add_command(label="Edit Task", command=self.edit_selected_task)
             context_menu.add_separator()
-            context_menu.add_command(label="Mark Complete", command=self.mark_complete)
+            context_menu.add_command(label=complete_label, command=self.toggle_complete)
             context_menu.add_command(label="Mark Paused", command=self.mark_paused)
             context_menu.add_separator()
             context_menu.add_command(label="Delete Task", command=self.delete_task)
@@ -224,8 +227,17 @@ class ModernTaskList:
         if self.on_task_update:
             self.on_task_update('refresh')
     
+    def toggle_complete(self):
+        """Toggle completion status of selected task"""
+        task = self.get_selected_task()
+        if task and self.on_task_update:
+            # Toggle completion status
+            current_status = task.get('completed', False)
+            action = 'incomplete' if current_status else 'complete'
+            self.on_task_update(action, task)
+    
     def mark_complete(self):
-        """Mark selected task as complete"""
+        """Mark selected task as complete (legacy method for backward compatibility)"""
         task = self.get_selected_task()
         if task and self.on_task_update:
             self.on_task_update('complete', task)
